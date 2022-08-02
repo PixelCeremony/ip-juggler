@@ -20,36 +20,6 @@ use regex::Regex;
 use std::fmt::Formatter;
 use std::{fmt, thread};
 
-const ROUTING_TABLE_NUMBER: u32 = 123;
-
-static OUR_TURN_TO_HOLD_IP: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
-
-#[derive(Debug)]
-struct SimpleError(String);
-
-impl Error for SimpleError {}
-
-impl fmt::Display for SimpleError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl From<&str> for SimpleError {
-    fn from(s: &str) -> Self {
-        SimpleError(String::from(s))
-    }
-}
-impl From<std::io::Error> for SimpleError {
-    fn from(e: std::io::Error) -> Self {
-        SimpleError(e.to_string())
-    }
-}
-
-fn err(s: String) -> Box<SimpleError> {
-    Box::new(SimpleError(s))
-}
-
 /// Settings
 #[derive(Debug, FromArgs)]
 struct Settings {
@@ -87,6 +57,10 @@ struct Settings {
     #[argh(option, default = "false")]
     print_arp: bool,
 }
+
+const ROUTING_TABLE_NUMBER: u32 = 123;
+
+static OUR_TURN_TO_HOLD_IP: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 
 fn main() -> Result<(), Box<dyn Error>> {
     let settings: Settings = argh::from_env();
@@ -453,4 +427,30 @@ fn handle_incoming_packet(
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct SimpleError(String);
+
+impl Error for SimpleError {}
+
+impl fmt::Display for SimpleError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for SimpleError {
+    fn from(s: &str) -> Self {
+        SimpleError(String::from(s))
+    }
+}
+impl From<std::io::Error> for SimpleError {
+    fn from(e: std::io::Error) -> Self {
+        SimpleError(e.to_string())
+    }
+}
+
+fn err(s: String) -> Box<SimpleError> {
+    Box::new(SimpleError(s))
 }
