@@ -4,7 +4,7 @@ require_relative './common'
 
 usage = <<EOS
 Usage: #{$0} <flags> -- <hosts>
-Flags added automatically: --local_index
+Flags added automatically: --total-participants and --local-index
 EOS
 usage.strip!
 usage = ""
@@ -44,5 +44,18 @@ end)
 
 puts "Running on all machines"
 await_processes(hosts.each_with_index.map do |ip, i|
-    sh_bg!(['konsole', '--separate', '--hold', '-e', 'ssh', "root@#{ip}", '/root/ip-juggler', '--local-index', i.to_s, *flags])
+    sh_bg!([
+        'konsole',
+        '--separate',
+        '--hold',
+        '-e',
+        'ssh',
+        "root@#{ip}",
+        '/root/ip-juggler',
+        '--total-participants',
+        hosts.size.to_s,
+        '--local-index',
+        i.to_s,
+        *flags
+    ])
 end)

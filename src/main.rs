@@ -1,20 +1,21 @@
 use std::error::Error;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use argh::FromArgs;
 use once_cell::sync::Lazy;
-use pnet::datalink::{self, NetworkInterface};
+use pnet::datalink::{self, DataLinkSender, NetworkInterface};
 
 use pnet::datalink::{Channel, DataLinkReceiver};
-use pnet::packet::arp::ArpPacket;
-use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
+use pnet::packet::arp::{ArpHardwareTypes, ArpOperations, ArpPacket, MutableArpPacket};
+use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::udp::UdpPacket;
-use pnet::packet::Packet;
+use pnet::packet::{Packet, PacketSize};
+use pnet::util::MacAddr;
 use regex::Regex;
 use std::fmt::Formatter;
 use std::{fmt, thread};
@@ -99,7 +100,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             ))
     };
 
-    let (_tx, rx) = {
+    let (tx, rx) = {
         match datalink::channel(&iface, Default::default()) {
             Ok(Channel::Ethernet(tx, rx)) => (tx, rx),
             Ok(_) => return Err(err(format!("Unhandled channel type"))),
@@ -114,6 +115,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let juggler_thread = {
         let iface_name = iface.name.clone();
+        let source_mac = iface.mac.ok_or(SimpleError(format!(
+            "Failed to get MAC address of interface: {}",
+            iface.name
+        )))?;
         let ip = settings.ip_to_juggle;
         let netmask = settings.netmask;
         let gateway = settings.gateway;
@@ -122,7 +127,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         let local_index = settings.local_index;
         thread::spawn(move || {
             juggler(
+                tx,
                 iface_name,
+                source_mac,
                 ip,
                 netmask,
                 gateway,
@@ -155,7 +162,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn juggler(
+    tx: Box<dyn DataLinkSender>,
     iface_name: String,
+    source_mac: MacAddr,
     ip_to_juggle: Ipv4Addr,
     netmask: u8,
     gateway: Ipv4Addr,
@@ -163,6 +172,8 @@ fn juggler(
     total_participants: usize,
     local_index: usize,
 ) {
+    let tx: Arc<Mutex<Box<dyn DataLinkSender>>> = Arc::new(Mutex::new(tx));
+
     let _ = give_up_ip(&iface_name, ip_to_juggle, netmask, gateway); // Ignore any errors
     loop {
         let t = unix_time();
@@ -172,8 +183,19 @@ fn juggler(
         if turn_number % total_participants == local_index {
             println!("Taking IP (turn {})", turn_number % total_participants);
             *OUR_TURN_TO_HOLD_IP.lock().unwrap() = true;
-            if let Err(e) = take_ip(&iface_name, ip_to_juggle, netmask, gateway) {
-                println!("Failed to take IP: {}", e);
+            match take_ip(&iface_name, ip_to_juggle, netmask, gateway) {
+                Ok(_) => {
+                    let tx = tx.clone();
+                    thread::spawn(move || {
+                        arp_spammer(
+                            tx.lock().unwrap().as_mut(),
+                            source_mac,
+                            ip_to_juggle,
+                            gateway,
+                        );
+                    });
+                }
+                Err(e) => println!("Failed to take IP: {}", e),
             }
         } else {
             println!("Giving up IP (turn {})", turn_number % total_participants);
@@ -184,6 +206,51 @@ fn juggler(
         }
 
         thread::sleep(Duration::from_secs_f64(turn_remaining + 0.0001));
+    }
+}
+
+fn arp_spammer(
+    tx: &mut dyn DataLinkSender,
+    source_mac: MacAddr,
+    source_ip: Ipv4Addr,
+    _gateway: Ipv4Addr,
+) {
+    for _ in 0..5 {
+        if *OUR_TURN_TO_HOLD_IP.lock().unwrap() {
+            let mut arp_packet =
+                MutableArpPacket::owned(vec![0; MutableArpPacket::minimum_packet_size()]).unwrap();
+            arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
+            arp_packet.set_protocol_type(EtherTypes::Ipv4);
+            arp_packet.set_hw_addr_len(6);
+            arp_packet.set_proto_addr_len(4);
+            arp_packet.set_operation(ArpOperations::Reply);
+            arp_packet.set_sender_hw_addr(source_mac);
+            arp_packet.set_sender_proto_addr(source_ip);
+            arp_packet.set_target_hw_addr(MacAddr::broadcast()); // https://gist.github.com/seungwon0/7110259
+            arp_packet.set_target_proto_addr(source_ip); // TODO: gateway?
+
+            let mut eth_packet = MutableEthernetPacket::owned(vec![
+                0;
+                MutableEthernetPacket::minimum_packet_size()
+                    + arp_packet.packet_size()
+            ])
+            .unwrap();
+            eth_packet.set_destination(MacAddr::broadcast());
+            eth_packet.set_source(source_mac);
+            eth_packet.set_ethertype(EtherTypes::Arp);
+            eth_packet.set_payload(arp_packet.packet());
+
+            match tx.send_to(eth_packet.packet(), None) {
+                Some(res) => match res {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("Failed to send gratuitous ARP: {}", e),
+                },
+                None => eprintln!("Failed to send gratuitous ARP: no result"),
+            }
+            thread::sleep(Duration::from_secs_f64(0.1));
+        } else {
+            break;
+        }
     }
 }
 
