@@ -8,7 +8,7 @@ def sh!(cmd)
     else
         raise "Bad cmd: #{cmd.type}"
     end
-    "Failed: #{cmd}: #{$?}" unless $?.success?
+    raise "Command failed: #{cmd}: #{$?}" unless $?.success?
 end
 
 def sh_bg!(cmd)

@@ -74,12 +74,18 @@ struct Settings {
     /// duration in seconds of holding an address. Default: 15
     #[argh(option, default = "15.0")]
     turn_duration: f64,
+    /// how long to wait between gratuitous ARP messages while holding the IP. Default: 0.5
+    #[argh(option, default = "0.5")]
+    arp_interval: f64,
     /// the UDP port for pinging. Default: 1234
     #[argh(option, default = "1234")]
     udp_ping_port: u16,
     /// interval in seconds for UDP pings. Default: 1
     #[argh(option, default = "1.0")]
     udp_ping_interval: f64,
+    /// whether to print arp packets
+    #[argh(option, default = "false")]
+    print_arp: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -123,6 +129,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let netmask = settings.netmask;
         let gateway = settings.gateway;
         let turn_duration = settings.turn_duration;
+        let arp_interval = settings.arp_interval;
         let total_participants = settings.total_participants;
         let local_index = settings.local_index;
         thread::spawn(move || {
@@ -134,6 +141,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 netmask,
                 gateway,
                 turn_duration,
+                arp_interval,
                 total_participants,
                 local_index,
             )
@@ -147,7 +155,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let ping_listener_thread = {
         let port = settings.udp_ping_port;
-        thread::spawn(move || ping_listener(rx, port))
+        let print_arp = settings.print_arp;
+        thread::spawn(move || ping_listener(rx, port, print_arp))
     };
 
     juggler_thread.join().expect("juggler thread panicked");
@@ -169,6 +178,7 @@ fn juggler(
     netmask: u8,
     gateway: Ipv4Addr,
     turn_duration: f64,
+    arp_interval: f64,
     total_participants: usize,
     local_index: usize,
 ) {
@@ -191,7 +201,7 @@ fn juggler(
                             tx.lock().unwrap().as_mut(),
                             source_mac,
                             ip_to_juggle,
-                            gateway,
+                            arp_interval,
                         );
                     });
                 }
@@ -213,44 +223,40 @@ fn arp_spammer(
     tx: &mut dyn DataLinkSender,
     source_mac: MacAddr,
     source_ip: Ipv4Addr,
-    _gateway: Ipv4Addr,
+    arp_interval: f64,
 ) {
-    for _ in 0..5 {
-        if *OUR_TURN_TO_HOLD_IP.lock().unwrap() {
-            let mut arp_packet =
-                MutableArpPacket::owned(vec![0; MutableArpPacket::minimum_packet_size()]).unwrap();
-            arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
-            arp_packet.set_protocol_type(EtherTypes::Ipv4);
-            arp_packet.set_hw_addr_len(6);
-            arp_packet.set_proto_addr_len(4);
-            arp_packet.set_operation(ArpOperations::Reply);
-            arp_packet.set_sender_hw_addr(source_mac);
-            arp_packet.set_sender_proto_addr(source_ip);
-            arp_packet.set_target_hw_addr(MacAddr::broadcast()); // https://gist.github.com/seungwon0/7110259
-            arp_packet.set_target_proto_addr(source_ip); // TODO: gateway?
+    while *OUR_TURN_TO_HOLD_IP.lock().unwrap() {
+        let mut arp_packet =
+            MutableArpPacket::owned(vec![0; MutableArpPacket::minimum_packet_size()]).unwrap();
+        arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
+        arp_packet.set_protocol_type(EtherTypes::Ipv4);
+        arp_packet.set_hw_addr_len(6);
+        arp_packet.set_proto_addr_len(4);
+        arp_packet.set_operation(ArpOperations::Reply);
+        arp_packet.set_sender_hw_addr(source_mac);
+        arp_packet.set_sender_proto_addr(source_ip);
+        arp_packet.set_target_hw_addr(MacAddr::broadcast()); // https://gist.github.com/seungwon0/7110259
+        arp_packet.set_target_proto_addr(source_ip); // TODO: gateway?
 
-            let mut eth_packet = MutableEthernetPacket::owned(vec![
-                0;
-                MutableEthernetPacket::minimum_packet_size()
-                    + arp_packet.packet_size()
-            ])
-            .unwrap();
-            eth_packet.set_destination(MacAddr::broadcast());
-            eth_packet.set_source(source_mac);
-            eth_packet.set_ethertype(EtherTypes::Arp);
-            eth_packet.set_payload(arp_packet.packet());
+        let mut eth_packet = MutableEthernetPacket::owned(vec![
+            0;
+            MutableEthernetPacket::minimum_packet_size()
+                + arp_packet.packet_size()
+        ])
+        .unwrap();
+        eth_packet.set_destination(MacAddr::broadcast());
+        eth_packet.set_source(source_mac);
+        eth_packet.set_ethertype(EtherTypes::Arp);
+        eth_packet.set_payload(arp_packet.packet());
 
-            match tx.send_to(eth_packet.packet(), None) {
-                Some(res) => match res {
-                    Ok(_) => {}
-                    Err(e) => eprintln!("Failed to send gratuitous ARP: {}", e),
-                },
-                None => eprintln!("Failed to send gratuitous ARP: no result"),
-            }
-            thread::sleep(Duration::from_secs_f64(0.1));
-        } else {
-            break;
+        match tx.send_to(eth_packet.packet(), None) {
+            Some(res) => match res {
+                Ok(_) => {}
+                Err(e) => eprintln!("Failed to send gratuitous ARP: {}", e),
+            },
+            None => eprintln!("Failed to send gratuitous ARP: no result"),
         }
+        thread::sleep(Duration::from_secs_f64(arp_interval));
     }
 }
 
@@ -307,8 +313,6 @@ fn take_ip(
         &ROUTING_TABLE_NUMBER.to_string(),
     ])?;
 
-    // TODO: arp?
-
     Ok(())
 }
 
@@ -358,8 +362,6 @@ fn give_up_ip(
         iface_name,
     ]));
 
-    // TODO: arp?
-
     for result in results {
         if let Err(e) = result {
             return Err(e);
@@ -393,10 +395,10 @@ fn ping_sender(interval: f64, dest_ip: Ipv4Addr, port: u16) {
     }
 }
 
-fn ping_listener(mut rx: Box<dyn DataLinkReceiver>, ping_port: u16) {
+fn ping_listener(mut rx: Box<dyn DataLinkReceiver>, ping_port: u16, print_arp_packets: bool) {
     loop {
         match rx.next() {
-            Ok(packet) => match handle_incoming_packet(packet, ping_port) {
+            Ok(packet) => match handle_incoming_packet(packet, ping_port, print_arp_packets) {
                 Ok(()) => {}
                 Err(e) => eprintln!("Failed to handle incoming Ethernet packet: {}", e),
             },
@@ -407,7 +409,11 @@ fn ping_listener(mut rx: Box<dyn DataLinkReceiver>, ping_port: u16) {
     }
 }
 
-fn handle_incoming_packet(eth_packet_buf: &[u8], ping_port: u16) -> Result<(), SimpleError> {
+fn handle_incoming_packet(
+    eth_packet_buf: &[u8],
+    ping_port: u16,
+    print_arp_packets: bool,
+) -> Result<(), SimpleError> {
     let eth_packet =
         EthernetPacket::new(eth_packet_buf).ok_or("failed to parse ethernet packet")?;
     if eth_packet.get_ethertype() == EtherTypes::Ipv4 {
@@ -429,12 +435,16 @@ fn handle_incoming_packet(eth_packet_buf: &[u8], ping_port: u16) -> Result<(), S
                 );
             }
         }
-    } else if eth_packet.get_ethertype() == EtherTypes::Arp {
+    } else if print_arp_packets && eth_packet.get_ethertype() == EtherTypes::Arp {
         let arp_packet =
             ArpPacket::new(eth_packet.payload()).ok_or("failed to parse ARP packet")?;
         println!(
             "Got ARP {} : {} ({}) -> {} ({})",
-            arp_packet.get_operation().0,
+            match arp_packet.get_operation().0 {
+                1 => "request",
+                2 => "reply",
+                _ => "<unknown>",
+            },
             arp_packet.get_sender_proto_addr(),
             arp_packet.get_sender_hw_addr(),
             arp_packet.get_target_proto_addr(),

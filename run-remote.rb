@@ -44,6 +44,7 @@ end)
 
 puts "Running on all machines"
 await_processes(hosts.each_with_index.map do |ip, i|
+    sleep 0.2
     sh_bg!([
         'konsole',
         '--separate',
