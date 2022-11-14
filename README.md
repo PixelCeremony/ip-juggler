@@ -11,6 +11,10 @@ The other machines send UDP pings to the IP. If the wrong machine receives the p
 
 Sometimes, usually within the first 10 minutes of running this program, the IP gets stuck on a machine. That machine keeps receiving the pings, accroding to pcap, despite the IP being removed from its network interface.
 
+# Hetzner's response
+
+Unfortunately, Hetzner support stated that vSwitches are not meant to be a failover solution and refused to fix this bug.
+
 # How to run
 
 Workstation dependencies:
